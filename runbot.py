@@ -25,8 +25,8 @@ def parse_arguments():
                              f'Available: {", ".join(ExchangeFactory.get_supported_exchanges())}')
 
     # Trading parameters
-    parser.add_argument('--ticker', type=str, default='ETH',
-                        help='Ticker (default: ETH)')
+    parser.add_argument('--ticker', type=str, default='QQQ',
+                        help='Ticker (default: QQQ)')
     parser.add_argument('--quantity', type=Decimal, default=Decimal(0.1),
                         help='Order quantity (default: 0.1)')
     parser.add_argument('--take-profit', type=Decimal, default=Decimal(0.02),

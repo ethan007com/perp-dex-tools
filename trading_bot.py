@@ -549,6 +549,12 @@ class TradingBot:
                     continue
 
                 if not mismatch_detected:
+                    # This blocks only new opening orders. Existing close
+                    # orders remain active and may continue to fill.
+                    if not await self.exchange_client.can_open_new_orders():
+                        await asyncio.sleep(5)
+                        continue
+
                     wait_time = self._calculate_wait_time()
 
                     if wait_time > 0:
