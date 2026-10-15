@@ -539,14 +539,23 @@ class ArcusClient(BaseExchangeClient):
         self,
         contract_id: str,
     ) -> List[OrderInfo]:
-        data = await self._call(
-            "GET",
-            "/v1/openOrders",
-            {
-                **self._account_params(),
-                "market": contract_id,
-            },
-        )
+        try:
+            data = await self._call(
+                "GET",
+                "/v1/openOrders",
+                {
+                    **self._account_params(),
+                    "market": contract_id,
+                },
+            )
+        except RuntimeError as exc:
+            # Arcus returns 404 for a new account with no activity.
+            if (
+                "HTTP 404" in str(exc)
+                and "no activity" in str(exc).lower()
+            ):
+                return []
+            raise
 
         return [
             self._to_order_info(row)
@@ -590,11 +599,20 @@ class ArcusClient(BaseExchangeClient):
         )
 
     async def get_account_positions(self) -> Decimal:
-        data = await self._call(
-            "GET",
-            "/v1/account",
-            self._account_params(),
-        )
+        try:
+            data = await self._call(
+                "GET",
+                "/v1/account",
+                self._account_params(),
+            )
+        except RuntimeError as exc:
+            # Arcus returns 404 for a new account with no activity.
+            if (
+                "HTTP 404" in str(exc)
+                and "no activity" in str(exc).lower()
+            ):
+                return Decimal("0")
+            raise
 
         market = self._load_market_sync()
         market_id = str(market["marketId"])
