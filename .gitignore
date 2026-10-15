@@ -196,3 +196,6 @@ cython_debug/
 
 # pyenv settings
 .python-version
+
+# Local environment files and backups
+.env.*
