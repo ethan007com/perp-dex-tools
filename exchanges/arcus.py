@@ -57,9 +57,9 @@ class ArcusClient(BaseExchangeClient):
             raise ValueError("ARCUS_NETWORK must be mainnet or testnet")
 
         self.base_url = (
-            "[https://api.arcus.xyz](https://api.arcus.xyz)"
+            "https://api.arcus.xyz"
             if self.network == "mainnet"
-            else "[https://api.testnet.arcus.xyz](https://api.testnet.arcus.xyz)"
+            else "https://api.testnet.arcus.xyz"
         )
 
         self.address = os.getenv("ARCUS_WALLET_ADDRESS", "").lower()
@@ -172,6 +172,9 @@ class ArcusClient(BaseExchangeClient):
             Encoding.Raw,
             PublicFormat.Raw,
         ).hex()
+
+        # Arcus requires the public API key header for authenticated reads.
+        self.session.headers["X-API-Key"] = self.api_key
 
     def _nonce(self) -> int:
         value = time.time_ns()
