@@ -208,6 +208,11 @@ class TradingBot:
                 )
 
                 self.last_open_order_time = time.time()
+
+                # Keep dry-run pacing consistent with the real strategy loop.
+                # The outer loop increments last_close_orders after this method.
+                self.last_close_orders = len(self.active_close_orders) - 1
+
                 return True
 
             # Reset state before placing order
