@@ -191,6 +191,52 @@ class TradingBot:
         else:
             return 1
 
+    async def _has_open_capacity(self) -> bool:
+        """Prevent new entries from exceeding max-orders exposure.
+
+        This only blocks new opening orders. Existing positions and
+        reduce-only closing orders are not cancelled or modified.
+        """
+        live_position = abs(
+            await self.exchange_client.get_account_positions()
+        )
+
+        active_orders = await self.exchange_client.get_active_orders(
+            self.config.contract_id
+        )
+
+        opening_side = self.config.direction.lower()
+
+        pending_open_quantity = sum(
+            abs(order.size)
+            for order in active_orders
+            if order.side.lower() == opening_side
+            and order.status in ("OPEN", "PARTIALLY_FILLED")
+        )
+
+        max_exposure = (
+            self.config.quantity * self.config.max_orders
+        )
+
+        projected_exposure = (
+            live_position
+            + pending_open_quantity
+            + self.config.quantity
+        )
+
+        if projected_exposure > max_exposure:
+            self.logger.log(
+                "[RISK] New opening order blocked: "
+                f"live_position={live_position}, "
+                f"pending_open={pending_open_quantity}, "
+                f"new_order={self.config.quantity}, "
+                f"max_exposure={max_exposure}",
+                "WARNING",
+            )
+            return False
+
+        return True
+
     async def _place_and_monitor_open_order(self) -> bool:
         """Place an order and monitor its execution."""
         try:
@@ -220,6 +266,10 @@ class TradingBot:
             self.current_order_status = 'OPEN'
             self.order_filled_amount = 0.0
 
+            # Hard live exposure guard before every opening attempt.
+            if not await self._has_open_capacity():
+                return False
+
             # Place the order
             order_result = await self.exchange_client.place_open_order(
                 self.config.contract_id,
@@ -242,8 +292,24 @@ class TradingBot:
             return await self._handle_order_result(order_result)
 
         except Exception as e:
-            self.logger.log(f"Error placing order: {e}", "ERROR")
-            self.logger.log(f"Traceback: {traceback.format_exc()}", "ERROR")
+            error_text = str(e)
+
+            if "HTTP 401" in error_text or "HTTP 403" in error_text:
+                self.logger.log(
+                    "Authentication/permission error; "
+                    "stopping bot to prevent repeated order attempts",
+                    "ERROR",
+                )
+                self.shutdown_requested = True
+
+            self.logger.log(
+                f"Error placing order: {e}",
+                "ERROR",
+            )
+            self.logger.log(
+                f"Traceback: {traceback.format_exc()}",
+                "ERROR",
+            )
             return False
 
     async def _handle_order_result(self, order_result) -> bool:
