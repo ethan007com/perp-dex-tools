@@ -49,6 +49,8 @@ def parse_arguments():
                         'Sell: pause if price <= pause-price. (default: -1, no pause)')
     parser.add_argument('--boost', action='store_true',
                         help='Use the Boost mode for volume boosting')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Calculate and log orders without sending them')
 
     return parser.parse_args()
 
@@ -116,7 +118,8 @@ async def main():
         grid_step=Decimal(args.grid_step),
         stop_price=Decimal(args.stop_price),
         pause_price=Decimal(args.pause_price),
-        boost_mode=args.boost
+        boost_mode=args.boost,
+        dry_run=args.dry_run
     )
 
     # Create and run the bot

@@ -32,6 +32,7 @@ class TradingConfig:
     stop_price: Decimal
     pause_price: Decimal
     boost_mode: bool
+    dry_run: bool = False
 
     @property
     def close_order_side(self) -> str:
@@ -193,6 +194,22 @@ class TradingBot:
     async def _place_and_monitor_open_order(self) -> bool:
         """Place an order and monitor its execution."""
         try:
+            if self.config.dry_run:
+                dry_run_price = await self.exchange_client.get_order_price(
+                    self.config.direction
+                )
+
+                self.logger.log(
+                    f"[DRY-RUN] Would place "
+                    f"{self.config.direction.upper()} "
+                    f"{self.config.quantity} {self.config.ticker} "
+                    f"at {dry_run_price}; no order was sent",
+                    "INFO",
+                )
+
+                self.last_open_order_time = time.time()
+                return True
+
             # Reset state before placing order
             self.order_filled_event.clear()
             self.current_order_status = 'OPEN'
