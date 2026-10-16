@@ -624,10 +624,20 @@ class ArcusClient(BaseExchangeClient):
         return dec(row.get("size", 0))
 
     async def can_open_new_orders(self) -> bool:
-        """Allow new entries only during US core market hours.
+        """Optionally restrict new entries to the US core session.
 
-        Existing close orders are not cancelled by this gate.
+        By default the restriction is disabled because QQQ-USD is a
+        perpetual contract that may trade outside the underlying ETF session.
+        Existing close orders are never cancelled by this gate.
         """
+        enabled = os.getenv(
+            "ARCUS_ENTRY_SESSION_ENABLED",
+            "false",
+        ).strip().lower() in ("1", "true", "yes", "on")
+
+        if not enabled:
+            return True
+
         market = await asyncio.to_thread(self._load_market_sync)
 
         rth = market.get("regularTradingHours")

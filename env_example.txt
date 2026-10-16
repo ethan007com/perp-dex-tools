@@ -96,3 +96,8 @@ ARCUS_ACCOUNT_INDEX=0
 # Existing close orders remain active outside this window.
 ARCUS_ENTRY_SESSION_START=09:30
 ARCUS_ENTRY_SESSION_END=16:00
+
+# Arcus entry session restriction
+# false = allow entries during the full perpetual session
+# true  = restrict new entries to the configured US session
+ARCUS_ENTRY_SESSION_ENABLED=false
