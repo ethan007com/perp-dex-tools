@@ -352,6 +352,14 @@ class ArcusClient(BaseExchangeClient):
     async def disconnect(self) -> None:
         self.logger.log("Arcus disconnected", "INFO")
 
+    async def get_account_snapshot(self) -> dict:
+        """Return the raw Arcus account snapshot for monitoring."""
+        return await self._call(
+            "GET",
+            "/v1/account",
+            self._account_params(),
+        )
+
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         market = await asyncio.to_thread(self._load_market_sync)
         return self.config.contract_id, dec(market["tickSize"])
@@ -624,35 +632,36 @@ class ArcusClient(BaseExchangeClient):
         return dec(row.get("size", 0))
 
     async def can_open_new_orders(self) -> bool:
-        """Optionally restrict new entries to the US core session.
+        """Return whether new entry orders are currently allowed.
 
-        By default the restriction is disabled because QQQ-USD is a
-        perpetual contract that may trade outside the underlying ETF session.
-        Existing close orders are never cancelled by this gate.
+        ARCUS_ENTRY_SESSION_ENABLED=false allows new entries all day.
+        When enabled, entries are restricted to the configured New York
+        session window. Existing reduce-only close orders are never blocked.
         """
         enabled = os.getenv(
             "ARCUS_ENTRY_SESSION_ENABLED",
             "false",
         ).strip().lower() in ("1", "true", "yes", "on")
 
+        # QQQ-USD is a perpetual market. When the session restriction is
+        # disabled, allow new entries around the clock.
         if not enabled:
             return True
 
-        market = await asyncio.to_thread(self._load_market_sync)
-
+        market = await asyncio.to_thread(self._market_sync)
         rth = market.get("regularTradingHours")
+
         if not rth:
             return True
 
         if market.get("isOutsideRth") is True:
             return False
 
-        timezone_name = rth.get(
-            "timezone",
-            "America/New_York",
+        tz = ZoneInfo(
+            rth.get("timezone", "America/New_York")
         )
 
-        now = datetime.now(ZoneInfo(timezone_name))
+        now = datetime.now(tz)
 
         if now.weekday() >= 5:
             return False
@@ -666,11 +675,11 @@ class ArcusClient(BaseExchangeClient):
             "16:00",
         )
 
-        start_hour, start_minute = (
+        start_h, start_m = (
             int(value)
             for value in start_text.split(":", 1)
         )
-        end_hour, end_minute = (
+        end_h, end_m = (
             int(value)
             for value in end_text.split(":", 1)
         )
@@ -680,9 +689,8 @@ class ArcusClient(BaseExchangeClient):
             + now.minute * 60
             + now.second
         )
-
-        start_seconds = start_hour * 3600 + start_minute * 60
-        end_seconds = end_hour * 3600 + end_minute * 60
+        start_seconds = start_h * 3600 + start_m * 60
+        end_seconds = end_h * 3600 + end_m * 60
 
         return start_seconds <= current_seconds < end_seconds
 
