@@ -11,3 +11,4 @@ __all__ = [
     'BaseExchangeClient', 'EdgeXClient', 'BackpackClient', 'ParadexClient',
     'GrvtClient', 'ArcusClient', 'ExchangeFactory', 'query_retry'
 ]
+from .entropy import EntropyClient
