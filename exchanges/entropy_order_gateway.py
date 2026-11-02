@@ -26,10 +26,22 @@ class EntropyOrderGateway:
     """
 
     def __init__(self, env_file: str = ".env.entropy"):
-        cfg = dotenv_values(
+        # runbot.py sets PERP_DEX_ENV_FILE from
+        # --env-file. Direct gateway tests may still
+        # use the explicitly supplied env_file.
+        selected_env_file = os.environ.get(
+            "PERP_DEX_ENV_FILE",
             env_file,
+        )
+
+        cfg = dotenv_values(
+            selected_env_file,
             interpolate=False,
         )
+
+        # Credentials are loaded exclusively from
+        # the selected env file. Stale shell
+        # ENTROPY_* values must not override it.
 
         self.network = cfg.get(
             "ENTROPY_NETWORK",

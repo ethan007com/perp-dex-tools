@@ -6,6 +6,7 @@ Modular Trading Bot - Supports multiple exchanges
 import argparse
 import asyncio
 import logging
+import os
 from pathlib import Path
 import sys
 import dotenv
@@ -102,7 +103,13 @@ async def main():
     if not env_path.exists():
         print(f"Env file not find: {env_path.resolve()}")
         sys.exit(1)
-    dotenv.load_dotenv(args.env_file)
+    dotenv.load_dotenv(args.env_file, override=True, interpolate=False)
+
+    # Pass the selected local env file to exchange adapters.
+    # The file itself is never committed to Git.
+    os.environ["PERP_DEX_ENV_FILE"] = str(
+        Path(args.env_file).resolve()
+    )
 
     # Create configuration
     config = TradingConfig(
