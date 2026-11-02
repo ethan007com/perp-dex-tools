@@ -106,21 +106,14 @@ class EntropyClient(BaseExchangeClient):
     async def get_contract_attributes(self):
         gateway = await self._require_connected()
 
-        return {
-            "contract_id": gateway.coin,
-            "symbol": gateway.ticker,
-            "dex": gateway.dex,
-            "sz_decimals": gateway.sz_decimals,
-            "max_leverage": gateway.market.get(
-                "maxLeverage"
-            ),
-            "only_isolated": gateway.market.get(
-                "onlyIsolated"
-            ),
-            "margin_mode": gateway.market.get(
-                "marginMode"
-            ),
-        }
+        # TradingBot expects exactly:
+        # contract_id, tick_size
+        #
+        # io:NVDA is quoted to 2 decimal places
+        # around the current price range.
+        tick_size = Decimal("0.01")
+
+        return gateway.coin, tick_size
 
     async def fetch_bbo_prices(
         self,
