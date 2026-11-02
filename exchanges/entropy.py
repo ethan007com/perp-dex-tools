@@ -1,286 +1,403 @@
-"""Entropy HIP-3 adapter through the Hyperliquid Python SDK.
-
-This first version is intentionally read-only for integration validation.
-Trading order methods will be enabled only after market/account checks pass.
-"""
-
 from __future__ import annotations
 
 import asyncio
-import os
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
-from typing import Any, List, Optional, Tuple
+from decimal import Decimal
+from typing import Any, Optional
 
-from hyperliquid.info import Info
-from hyperliquid.utils.constants import MAINNET_API_URL
+from exchanges.base import (
+    BaseExchangeClient,
+    OrderInfo,
+    OrderResult,
+)
 
-from .base import BaseExchangeClient, OrderInfo, OrderResult
+from exchanges.entropy_order_gateway import (
+    EntropyOrderGateway,
+)
 
-def dec(value: Any) -> Decimal:
-    return Decimal(str(value))
+def _get_config(config, name, default=None):
+    if isinstance(config, dict):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+def _d(value, default=Decimal("0")):
+    if value is None:
+        return default
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return default
 
 class EntropyClient(BaseExchangeClient):
-    """Read-only Entropy HIP-3 client.
+    """
+    Hyperliquid HIP-3 Entropy adapter.
 
-    Entropy is the Hyperliquid deployer dex named ``io``.
-    Coins are represented as ``io:SYMBOL``.
+    固定市场：
+        dex  = io
+        coin = io:NVDA
+
+    写请求统一由 EntropyOrderGateway 保护。
     """
 
     def __init__(self, config):
-        self.dex = os.getenv("ENTROPY_DEX", "io")
-        self.network = os.getenv("ENTROPY_NETWORK", "mainnet").lower()
-        self.account_address = os.getenv(
-            "ENTROPY_ACCOUNT_ADDRESS",
-            "",
-        ).lower()
-
-        self.info: Optional[Info] = None
-        self.meta_data: Optional[dict] = None
-        self.market_info: Optional[dict] = None
-        self.orderbook: Optional[dict] = None
-
+        self.gateway: Optional[
+            EntropyOrderGateway
+        ] = None
+        self._order_update_handler = None
+        self.contract_id = "io:NVDA"
+        self._market = None
         super().__init__(config)
 
     def _validate_config(self) -> None:
-        ticker = str(
-            getattr(self.config, "ticker", "")
-        ).upper().removesuffix("-USD")
+        dex = _get_config(
+            self.config,
+            "dex",
+            _get_config(
+                self.config,
+                "entropy_dex",
+                "io",
+            ),
+        )
 
-        if not ticker:
-            raise ValueError("Entropy ticker is required")
+        ticker = _get_config(
+            self.config,
+            "ticker",
+            _get_config(
+                self.config,
+                "symbol",
+                "NVDA",
+            ),
+        )
 
-        self.config.ticker = ticker
-        self.config.contract_id = f"{self.dex}:{ticker}"
-
-        if self.network != "mainnet":
+        if str(dex).lower() != "io":
             raise ValueError(
-                "Entropy integration currently requires "
-                "ENTROPY_NETWORK=mainnet"
+                "Entropy requires dex=io"
             )
 
-        if not self.account_address:
+        if str(ticker).upper() != "NVDA":
             raise ValueError(
-                "ENTROPY_ACCOUNT_ADDRESS is required"
-            )
-
-        if not (
-            self.account_address.startswith("0x")
-            and len(self.account_address) == 42
-        ):
-            raise ValueError(
-                "ENTROPY_ACCOUNT_ADDRESS must be a valid "
-                "0x address"
+                "Entropy requires ticker=NVDA"
             )
 
     async def connect(self) -> None:
-        self.info = await asyncio.to_thread(
-            Info,
-            MAINNET_API_URL,
-            True,
-            None,
-            None,
-            [self.dex],
+        self.gateway = await asyncio.to_thread(
+            EntropyOrderGateway,
+            ".env.entropy",
         )
 
-        self.meta_data = await asyncio.to_thread(
-            self.info.meta,
-            self.dex,
-        )
-
-        markets = self.meta_data.get("universe", [])
-        matches = [
-            item
-            for item in markets
-            if item.get("name") == self.config.contract_id
-            and not item.get("isDelisted", False)
-        ]
-
-        if len(matches) != 1:
-            available = [
-                item.get("name")
-                for item in markets
-                if not item.get("isDelisted", False)
-            ]
-            raise RuntimeError(
-                f"Entropy market not found: "
-                f"{self.config.contract_id}; "
-                f"available={available}"
-            )
-
-        self.market_info = matches[0]
+        self._market = self.gateway.market
+        self.contract_id = "io:NVDA"
 
     async def disconnect(self) -> None:
-        if self.info is not None:
-            try:
-                await asyncio.to_thread(
-                    self.info.disconnect_websocket
-                )
-            except RuntimeError:
-                pass
+        self.gateway = None
+        self._market = None
 
-        self.info = None
-
-    def _require_info(self) -> Info:
-        if self.info is None:
+    def _require_gateway(self) -> EntropyOrderGateway:
+        if self.gateway is None:
             raise RuntimeError(
                 "Entropy client is not connected"
             )
-        return self.info
+        return self.gateway
 
-    def _require_market(self) -> dict:
-        if self.market_info is None:
-            raise RuntimeError(
-                "Entropy market metadata is not loaded"
-            )
-        return self.market_info
+    async def _require_connected(self):
+        if self.gateway is None:
+            await self.connect()
+        return self._require_gateway()
 
-    async def get_contract_attributes(
-        self,
-    ) -> Tuple[str, Decimal]:
-        market = self._require_market()
-        sz_decimals = int(market["szDecimals"])
+    async def get_contract_attributes(self):
+        gateway = await self._require_connected()
 
-        # Hyperliquid does not expose a universal price tick in meta.
-        # Keep a conservative price precision for the read-only stage.
-        tick_size = Decimal(
-            "1e-" + str(max(0, sz_decimals))
-        )
-
-        self.config.tick_size = tick_size
-        return self.config.contract_id, tick_size
+        return {
+            "contract_id": gateway.coin,
+            "symbol": gateway.ticker,
+            "dex": gateway.dex,
+            "sz_decimals": gateway.sz_decimals,
+            "max_leverage": gateway.market.get(
+                "maxLeverage"
+            ),
+            "only_isolated": gateway.market.get(
+                "onlyIsolated"
+            ),
+            "margin_mode": gateway.market.get(
+                "marginMode"
+            ),
+        }
 
     async def fetch_bbo_prices(
         self,
         contract_id: str,
-    ) -> Tuple[Decimal, Decimal]:
-        info = self._require_info()
+    ):
+        gateway = await self._require_connected()
+
+        if contract_id != gateway.coin:
+            raise ValueError(
+                f"Unsupported contract: {contract_id}"
+            )
 
         book = await asyncio.to_thread(
-            info.l2_snapshot,
-            contract_id,
+            gateway.info.l2_snapshot,
+            gateway.coin,
         )
 
         levels = book.get("levels", [])
+
         if len(levels) != 2:
             raise RuntimeError(
-                f"Entropy returned invalid L2 book: {contract_id}"
+                "Entropy order book format invalid"
             )
 
-        bids = levels[0]
-        asks = levels[1]
-
-        if not bids or not asks:
+        if not levels[0] or not levels[1]:
             raise RuntimeError(
-                f"Entropy order book is empty: {contract_id}"
+                "Entropy order book is empty"
             )
 
-        best_bid = dec(bids[0]["px"])
-        best_ask = dec(asks[0]["px"])
+        bid = Decimal(
+            str(levels[0][0]["px"])
+        )
+        ask = Decimal(
+            str(levels[1][0]["px"])
+        )
 
-        if not (best_bid > 0 and best_ask > best_bid):
-            raise RuntimeError(
-                f"Entropy returned invalid BBO: "
-                f"{best_bid}/{best_ask}"
-            )
-
-        self.orderbook = book
-        return best_bid, best_ask
+        return {
+            "best_bid": bid,
+            "best_ask": ask,
+            "bid": bid,
+            "ask": ask,
+        }
 
     async def get_order_price(
         self,
         direction: str,
-    ) -> Decimal:
-        bid, ask = await self.fetch_bbo_prices(
-            self.config.contract_id
+    ):
+        bbo = await self.fetch_bbo_prices(
+            self.contract_id
         )
 
-        if direction.lower() == "buy":
-            return bid
+        direction = str(direction).lower()
 
-        return ask
+        if direction in ("buy", "long"):
+            return bbo["best_bid"]
+
+        if direction in ("sell", "short"):
+            return bbo["best_ask"]
+
+        raise ValueError(
+            f"Unsupported direction: {direction}"
+        )
 
     async def get_account_positions(self) -> Decimal:
-        info = self._require_info()
+        gateway = await self._require_connected()
 
         state = await asyncio.to_thread(
-            info.user_state,
-            self.account_address,
-            self.dex,
+            gateway.info.user_state,
+            gateway.account_address,
+            dex=gateway.dex,
         )
 
         total = Decimal("0")
 
-        for item in state.get("assetPositions", []):
+        for item in state.get(
+            "assetPositions",
+            [],
+        ):
             position = item.get("position", {})
-            if position.get("coin") != self.config.contract_id:
+            coin = position.get("coin")
+
+            if coin != gateway.coin:
                 continue
 
-            total += abs(dec(position.get("szi", "0")))
+            total += abs(
+                _d(position.get("szi"))
+            )
 
         return total
 
     async def get_active_orders(
         self,
         contract_id: str,
-    ) -> List[OrderInfo]:
-        info = self._require_info()
+    ):
+        gateway = await self._require_connected()
 
-        rows = await asyncio.to_thread(
-            info.open_orders,
-            self.account_address,
-            self.dex,
+        if contract_id != gateway.coin:
+            raise ValueError(
+                f"Unsupported contract: {contract_id}"
+            )
+
+        orders = await asyncio.to_thread(
+            gateway.open_orders
         )
 
         result = []
 
-        for row in rows:
-            if row.get("coin") != contract_id:
+        for order in orders:
+            if order.get("coin") != gateway.coin:
                 continue
 
-            side = (
-                "buy"
-                if row.get("side") == "B"
-                else "sell"
+            oid = order.get("oid")
+            side = str(
+                order.get("side", "")
+            ).upper()
+
+            size = _d(
+                order.get("sz")
+                or order.get("origSz")
             )
-            size = dec(row.get("sz", "0"))
-            price = dec(row.get("limitPx", "0"))
+
+            price = _d(
+                order.get("limitPx")
+                or order.get("px")
+            )
 
             result.append(
                 OrderInfo(
-                    order_id=str(row.get("oid")),
+                    order_id=str(oid),
                     side=side,
                     size=size,
                     price=price,
-                    status="OPEN",
+                    status="open",
                     filled_size=Decimal("0"),
                     remaining_size=size,
-                    cancel_reason="",
                 )
             )
 
         return result
 
-    async def get_account_snapshot(self) -> dict:
-        info = self._require_info()
+    async def get_account_snapshot(self):
+        gateway = await self._require_connected()
 
         state = await asyncio.to_thread(
-            info.user_state,
-            self.account_address,
-            self.dex,
+            gateway.info.user_state,
+            gateway.account_address,
+            dex=gateway.dex,
         )
 
-        return state
+        margin = state.get(
+            "marginSummary",
+            {},
+        )
+
+        return {
+            "account_value": _d(
+                margin.get("accountValue")
+            ),
+            "total_margin_used": _d(
+                margin.get("totalMarginUsed")
+            ),
+            "total_notional": _d(
+                margin.get("totalNtlPos")
+            ),
+            "withdrawable": _d(
+                state.get("withdrawable")
+            ),
+            "position_size": await self.get_account_positions(),
+        }
 
     async def can_open_new_orders(self) -> bool:
-        # Entropy equity perpetuals trade continuously.
-        return True
+        gateway = await self._require_connected()
 
-    def setup_order_update_handler(self, handler) -> None:
-        # The first adapter version uses REST polling.
-        self._order_update_handler = handler
+        if not gateway.trading_enabled:
+            return False
 
-    def get_exchange_name(self) -> str:
-        return "entropy"
+        snapshot = await self.get_account_snapshot()
+
+        return (
+            snapshot["withdrawable"]
+            > Decimal("0")
+        )
+
+    @staticmethod
+    def _extract_order_status(response):
+        if not isinstance(response, dict):
+            return None
+
+        outer = response.get("response")
+        if not isinstance(outer, dict):
+            return None
+
+        data = outer.get("data")
+        if not isinstance(data, dict):
+            return None
+
+        statuses = data.get("statuses")
+        if not isinstance(statuses, list):
+            return None
+
+        if not statuses:
+            return None
+
+        return statuses[0]
+
+    @classmethod
+    def _order_result(
+        cls,
+        response,
+        side,
+        size,
+        price,
+    ) -> OrderResult:
+        status = cls._extract_order_status(
+            response
+        )
+
+        if not isinstance(status, dict):
+            return OrderResult(
+                success=False,
+                side=side,
+                size=size,
+                price=price,
+                status="unknown",
+                error_message=str(response)[:500],
+            )
+
+        if "resting" in status:
+            oid = status["resting"].get("oid")
+
+            return OrderResult(
+                success=True,
+                order_id=str(oid),
+                side=side,
+                size=size,
+                price=price,
+                status="resting",
+                filled_size=Decimal("0"),
+            )
+
+        if "filled" in status:
+            filled = status["filled"]
+            oid = filled.get("oid")
+            total_filled = _d(
+                filled.get("totalSz")
+            )
+
+            return OrderResult(
+                success=True,
+                order_id=str(oid),
+                side=side,
+                size=size,
+                price=price,
+                status="filled",
+                filled_size=total_filled,
+            )
+
+        if "error" in status:
+            return OrderResult(
+                success=False,
+                side=side,
+                size=size,
+                price=price,
+                status="rejected",
+                error_message=str(
+                    status["error"]
+                ),
+            )
+
+        return OrderResult(
+            success=False,
+            side=side,
+            size=size,
+            price=price,
+            status="unknown",
+            error_message=str(status),
+        )
 
     async def place_open_order(
         self,
@@ -288,9 +405,43 @@ class EntropyClient(BaseExchangeClient):
         quantity: Decimal,
         direction: str,
     ) -> OrderResult:
-        raise NotImplementedError(
-            "Entropy order submission is disabled until "
-            "read-only validation passes"
+        gateway = await self._require_connected()
+
+        if contract_id != gateway.coin:
+            raise ValueError(
+                f"Unsupported contract: {contract_id}"
+            )
+
+        direction = str(direction).lower()
+
+        if direction in ("buy", "long"):
+            is_buy = True
+            side = "BUY"
+        elif direction in ("sell", "short"):
+            is_buy = False
+            side = "SELL"
+        else:
+            raise ValueError(
+                f"Unsupported direction: {direction}"
+            )
+
+        price = await self.get_order_price(
+            direction
+        )
+
+        response = await asyncio.to_thread(
+            gateway.place_open_order,
+            is_buy,
+            quantity,
+            price,
+            True,
+        )
+
+        return self._order_result(
+            response,
+            side,
+            _d(quantity),
+            price,
         )
 
     async def place_close_order(
@@ -300,30 +451,137 @@ class EntropyClient(BaseExchangeClient):
         price: Decimal,
         side: str,
     ) -> OrderResult:
-        raise NotImplementedError(
-            "Entropy order submission is disabled until "
-            "read-only validation passes"
+        gateway = await self._require_connected()
+
+        if contract_id != gateway.coin:
+            raise ValueError(
+                f"Unsupported contract: {contract_id}"
+            )
+
+        side = str(side).upper()
+
+        if side == "SELL":
+            is_buy = False
+        elif side == "BUY":
+            is_buy = True
+        else:
+            raise ValueError(
+                f"Unsupported close side: {side}"
+            )
+
+        response = await asyncio.to_thread(
+            gateway.place_reduce_only_close,
+            is_buy,
+            quantity,
+            price,
+            True,
+        )
+
+        return self._order_result(
+            response,
+            side,
+            _d(quantity),
+            _d(price),
         )
 
     async def cancel_order(
         self,
         order_id: str,
     ) -> OrderResult:
-        raise NotImplementedError(
-            "Entropy order cancellation is disabled until "
-            "trading methods are enabled"
+        gateway = await self._require_connected()
+
+        oid = int(order_id)
+
+        response = await asyncio.to_thread(
+            gateway.cancel_order,
+            oid,
+        )
+
+        success = (
+            isinstance(response, dict)
+            and response.get("status") == "ok"
+        )
+
+        return OrderResult(
+            success=success,
+            order_id=str(oid),
+            status="cancelled" if success else "failed",
+            error_message=None
+            if success
+            else str(response)[:500],
         )
 
     async def get_order_info(
         self,
         order_id: str,
     ) -> Optional[OrderInfo]:
-        active = await self.get_active_orders(
-            self.config.contract_id
+        gateway = await self._require_connected()
+
+        response = await asyncio.to_thread(
+            gateway.query_order,
+            int(order_id),
         )
 
-        for order in active:
-            if order.order_id == str(order_id):
-                return order
+        if not isinstance(response, dict):
+            return None
 
-        return None
+        status = response.get("status")
+        order = response.get("order", response)
+
+        if not isinstance(order, dict):
+            return None
+
+        side = str(
+            order.get("side", "")
+        ).upper()
+
+        original_size = _d(
+            order.get("origSz")
+            or order.get("sz")
+        )
+
+        remaining_size = _d(
+            order.get("sz")
+            or order.get("origSz")
+        )
+
+        price = _d(
+            order.get("limitPx")
+            or order.get("px")
+        )
+
+        filled = max(
+            Decimal("0"),
+            original_size - remaining_size,
+        )
+
+        if status == "order":
+            normalized_status = str(
+                order.get("status", "unknown")
+            ).lower()
+        else:
+            normalized_status = str(
+                status or "unknown"
+            ).lower()
+
+        return OrderInfo(
+            order_id=str(order_id),
+            side=side,
+            size=original_size,
+            price=price,
+            status=normalized_status,
+            filled_size=filled,
+            remaining_size=max(
+                Decimal("0"),
+                remaining_size,
+            ),
+        )
+
+    def setup_order_update_handler(
+        self,
+        handler,
+    ) -> None:
+        self._order_update_handler = handler
+
+    def get_exchange_name(self) -> str:
+        return "entropy"
