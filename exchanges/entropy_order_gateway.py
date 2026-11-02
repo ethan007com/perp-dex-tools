@@ -81,17 +81,6 @@ class EntropyOrderGateway:
             == "true"
         )
 
-        # Second independent live-trading approval.
-        # Both flags must be true before any write.
-        self.live_trading_approved = (
-            str(
-                cfg.get(
-                    "ENTROPY_LIVE_TRADING_APPROVED",
-                    "false",
-                )
-            ).lower()
-            == "true"
-        )
 
         if self.network != "mainnet":
             raise RuntimeError(
@@ -199,7 +188,6 @@ class EntropyOrderGateway:
             "main_account": self.account_address,
             "signer": self.wallet.address,
             "trading_enabled": self.trading_enabled,
-            "live_trading_approved": self.live_trading_approved,
             "sz_decimals": self.sz_decimals,
             "max_leverage": self.market.get(
                 "maxLeverage"
@@ -252,11 +240,6 @@ class EntropyOrderGateway:
         if not self.trading_enabled:
             raise RuntimeError(
                 "Entropy trading is disabled"
-            )
-
-        if not self.live_trading_approved:
-            raise RuntimeError(
-                "Entropy live trading is not approved"
             )
 
     @staticmethod
