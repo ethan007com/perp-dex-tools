@@ -13,8 +13,10 @@ from exchanges.entropy_order_gateway import (
 )
 
 COIN = "io:NVDA"
-SIZE = Decimal("0.001")
+DEFAULT_SIZE = Decimal("0.001")
 PRICE_TICK = Decimal("0.01")
+MIN_NOTIONAL = Decimal("10")
+SIZE_STEP = Decimal("0.001")
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -32,6 +34,11 @@ def parse_args():
             ".env",
         ),
         help="selected dotenv configuration file",
+    )
+    parser.add_argument(
+        "--size",
+        default=str(DEFAULT_SIZE),
+        help="order size in NVDA",
     )
     return parser.parse_args()
 
@@ -76,12 +83,30 @@ def main():
         args.env_file
     )
 
+    size = Decimal(str(args.size))
+
+    if (
+        not size.is_finite()
+        or size <= 0
+    ):
+        raise SystemExit(
+            "invalid order size"
+        )
+
+    if (
+        size % SIZE_STEP
+        != Decimal("0")
+    ):
+        raise SystemExit(
+            "size must use 0.001 step"
+        )
+
     print("env_file:", args.env_file)
     print("main account:", mask(gateway.account_address))
     print("signer:", mask(gateway.wallet.address))
     print("dex:", gateway.dex)
     print("coin:", gateway.coin)
-    print("size:", SIZE)
+    print("size:", size)
     print("trading_enabled:", gateway.trading_enabled)
 
     if gateway.coin != COIN:
@@ -152,6 +177,26 @@ def main():
             "invalid test price"
         )
 
+    notional = price * size
+    print("estimated_notional:", notional)
+
+    if notional < MIN_NOTIONAL:
+        minimum_size = (
+            MIN_NOTIONAL / price
+        ).quantize(
+            SIZE_STEP
+        )
+
+        if minimum_size * price < MIN_NOTIONAL:
+            minimum_size += SIZE_STEP
+
+        raise SystemExit(
+            "order value below exchange minimum: "
+            f"{notional} < {MIN_NOTIONAL}; "
+            f"use --size at least "
+            f"{minimum_size}"
+        )
+
     cloid_text = (
         "0x"
         + uuid.uuid4().hex[:32]
@@ -167,7 +212,7 @@ def main():
     response = gateway.exchange.order(
         gateway.coin,
         True,
-        float(SIZE),
+        float(size),
         float(price),
         {"limit": {"tif": "Alo"}},
         reduce_only=False,
