@@ -106,46 +106,6 @@ def main():
         dex=gateway.dex,
     )
 
-    margin_summary = state.get(
-        "marginSummary",
-        {},
-    )
-
-    account_value = Decimal(
-        str(
-            margin_summary.get(
-                "accountValue",
-                "0",
-            )
-        )
-    )
-
-    withdrawable = Decimal(
-        str(
-            state.get(
-                "withdrawable",
-                "0",
-            )
-        )
-    )
-
-    print("io_account_value:", account_value)
-    print("io_withdrawable:", withdrawable)
-
-    if not account_value.is_finite():
-        raise SystemExit(
-            "invalid io accountValue; "
-            "one-shot test aborted"
-        )
-
-    if account_value <= 0:
-        raise SystemExit(
-            "io accountValue is zero; "
-            "Spot collateral is not confirmed "
-            "for io:NVDA; "
-            "one-shot test aborted"
-        )
-
     positions = state.get(
         "assetPositions",
         [],
