@@ -115,67 +115,40 @@ class EntropyClient(BaseExchangeClient):
 
         return gateway.coin, tick_size
 
-    async def fetch_bbo_prices(
-        self,
-        contract_id: str,
-    ):
+    async def fetch_bbo_prices(self, contract_id):
         gateway = await self._require_connected()
-
         if contract_id != gateway.coin:
-            raise ValueError(
-                f"Unsupported contract: {contract_id}"
-            )
+            raise ValueError("Unsupported Entropy contract")
 
         book = await asyncio.to_thread(
-            gateway.info.l2_snapshot,
-            gateway.coin,
+            gateway.info.l2_snapshot, gateway.coin
         )
-
         levels = book.get("levels", [])
+        if len(levels) != 2 or not levels[0] or not levels[1]:
+            raise RuntimeError("Entropy order book is empty or invalid")
 
-        if len(levels) != 2:
-            raise RuntimeError(
-                "Entropy order book format invalid"
-            )
+        bid = Decimal(str(levels[0][0]["px"]))
+        ask = Decimal(str(levels[1][0]["px"]))
+        if (
+            not bid.is_finite()
+            or not ask.is_finite()
+            or bid <= 0
+            or ask <= 0
+            or bid >= ask
+        ):
+            raise RuntimeError("Entropy BBO is invalid")
 
-        if not levels[0] or not levels[1]:
-            raise RuntimeError(
-                "Entropy order book is empty"
-            )
+        # TradingBot expects exactly: best_bid, best_ask.
+        return bid, ask
 
-        bid = Decimal(
-            str(levels[0][0]["px"])
-        )
-        ask = Decimal(
-            str(levels[1][0]["px"])
-        )
-
-        return {
-            "best_bid": bid,
-            "best_ask": ask,
-            "bid": bid,
-            "ask": ask,
-        }
-
-    async def get_order_price(
-        self,
-        direction: str,
-    ):
-        bbo = await self.fetch_bbo_prices(
-            self.contract_id
-        )
-
+    async def get_order_price(self, direction):
+        bid, ask = await self.fetch_bbo_prices(self.contract_id)
         direction = str(direction).lower()
-
         if direction in ("buy", "long"):
-            return bbo["best_bid"]
-
+            return bid
         if direction in ("sell", "short"):
-            return bbo["best_ask"]
-
-        raise ValueError(
-            f"Unsupported direction: {direction}"
-        )
+            return ask
+        raise ValueError("Unsupported order direction")
 
     async def get_account_positions(self) -> Decimal:
         gateway = await self._require_connected()
@@ -204,54 +177,54 @@ class EntropyClient(BaseExchangeClient):
 
         return total
 
-    async def get_active_orders(
-        self,
-        contract_id: str,
-    ):
+    async def get_active_orders(self, contract_id):
         gateway = await self._require_connected()
-
         if contract_id != gateway.coin:
-            raise ValueError(
-                f"Unsupported contract: {contract_id}"
-            )
+            raise ValueError("Unsupported Entropy contract")
 
-        orders = await asyncio.to_thread(
-            gateway.open_orders
-        )
+        orders = await asyncio.to_thread(gateway.open_orders)
+        if not isinstance(orders, list):
+            raise RuntimeError("Active orders response invalid")
 
         result = []
-
         for order in orders:
             if order.get("coin") != gateway.coin:
                 continue
 
-            oid = order.get("oid")
-            side = str(
-                order.get("side", "")
-            ).upper()
-
-            size = _d(
-                order.get("sz")
-                or order.get("origSz")
+            side = {"B": "BUY", "A": "SELL"}.get(
+                str(order.get("side", "")).upper()
             )
+            if side is None:
+                raise RuntimeError("Unknown active order side")
+            if order.get("oid") is None:
+                raise RuntimeError("Active order id missing")
 
-            price = _d(
-                order.get("limitPx")
-                or order.get("px")
-            )
+            try:
+                remaining = Decimal(str(order["sz"]))
+                original = Decimal(str(order.get("origSz", order["sz"])))
+                price = Decimal(str(order["limitPx"]))
+            except Exception:
+                raise RuntimeError("Active order numeric fields invalid") from None
 
-            result.append(
-                OrderInfo(
-                    order_id=str(oid),
-                    side=side,
-                    size=size,
-                    price=price,
-                    status="open",
-                    filled_size=Decimal("0"),
-                    remaining_size=size,
-                )
-            )
+            if (
+                not all(x.is_finite() for x in (remaining, original, price))
+                or remaining < 0
+                or original <= 0
+                or remaining > original
+                or price <= 0
+            ):
+                raise RuntimeError("Active order quantities or price invalid")
 
+            filled = original - remaining
+            result.append(OrderInfo(
+                order_id=str(order["oid"]),
+                side=side,
+                size=original,
+                price=price,
+                status="PARTIALLY_FILLED" if filled > 0 else "OPEN",
+                filled_size=filled,
+                remaining_size=remaining,
+            ))
         return result
 
     async def get_account_snapshot(self):
@@ -337,7 +310,7 @@ class EntropyClient(BaseExchangeClient):
                 side=side,
                 size=size,
                 price=price,
-                status="unknown",
+                status="UNKNOWN",
                 error_message=str(response)[:500],
             )
 
@@ -350,7 +323,7 @@ class EntropyClient(BaseExchangeClient):
                 side=side,
                 size=size,
                 price=price,
-                status="resting",
+                status="OPEN",
                 filled_size=Decimal("0"),
             )
 
@@ -367,7 +340,7 @@ class EntropyClient(BaseExchangeClient):
                 side=side,
                 size=size,
                 price=price,
-                status="filled",
+                status="FILLED",
                 filled_size=total_filled,
             )
 
@@ -377,7 +350,7 @@ class EntropyClient(BaseExchangeClient):
                 side=side,
                 size=size,
                 price=price,
-                status="rejected",
+                status="REJECTED",
                 error_message=str(
                     status["error"]
                 ),
@@ -388,7 +361,7 @@ class EntropyClient(BaseExchangeClient):
             side=side,
             size=size,
             price=price,
-            status="unknown",
+            status="UNKNOWN",
             error_message=str(status),
         )
 
@@ -504,70 +477,83 @@ class EntropyClient(BaseExchangeClient):
             else str(response)[:500],
         )
 
-    async def get_order_info(
-        self,
-        order_id: str,
-    ) -> Optional[OrderInfo]:
+    async def get_order_info(self, order_id):
         gateway = await self._require_connected()
-
         response = await asyncio.to_thread(
-            gateway.query_order,
-            int(order_id),
+            gateway.query_order, int(order_id)
         )
 
+        # Unknown order is not equivalent to canceled or unfilled.
         if not isinstance(response, dict):
-            return None
+            raise RuntimeError("Order query response invalid; reconciliation required")
+        if response.get("status") != "order":
+            raise RuntimeError("Order state unknown; do not resubmit automatically")
 
-        status = response.get("status")
-        order = response.get("order", response)
+        envelope = response.get("order")
+        if not isinstance(envelope, dict):
+            raise RuntimeError("Order query envelope invalid")
 
-        if not isinstance(order, dict):
-            return None
+        # Standard nested response:
+        # response.order.status
+        # response.order.order.{oid, coin, side, origSz, sz, limitPx}
+        # Also accept the earlier flat test fixture.
+        details = envelope.get("order", envelope)
+        if not isinstance(details, dict):
+            raise RuntimeError("Order details invalid")
 
-        side = str(
-            order.get("side", "")
-        ).upper()
+        oid = details.get("oid")
+        if oid is not None and str(oid) != str(order_id):
+            raise RuntimeError("Order id mismatch")
 
-        original_size = _d(
-            order.get("origSz")
-            or order.get("sz")
-        )
+        coin = details.get("coin")
+        if coin is not None and coin != gateway.coin:
+            raise RuntimeError("Order belongs to another market")
 
-        remaining_size = _d(
-            order.get("sz")
-            or order.get("origSz")
-        )
+        raw_side = str(details.get("side", "")).upper()
+        sides = {"B": "BUY", "A": "SELL", "BUY": "BUY", "SELL": "SELL"}
+        if raw_side not in sides:
+            raise RuntimeError("Unknown order side")
 
-        price = _d(
-            order.get("limitPx")
-            or order.get("px")
-        )
+        def number(key):
+            try:
+                value = Decimal(str(details[key]))
+            except Exception:
+                raise RuntimeError("Order numeric field missing or invalid") from None
+            if not value.is_finite() or value < 0:
+                raise RuntimeError("Order numeric field outside valid range")
+            return value
 
-        filled = max(
-            Decimal("0"),
-            original_size - remaining_size,
-        )
+        # Do not use `sz or origSz`: numeric zero is a valid remaining size.
+        original = number("origSz")
+        remaining = number("sz")
+        price = number("limitPx")
+        if original <= 0 or price <= 0 or remaining > original:
+            raise RuntimeError("Order quantities or price are inconsistent")
 
-        if status == "order":
-            normalized_status = str(
-                order.get("status", "unknown")
-            ).lower()
+        raw_status = str(envelope.get("status", "")).lower()
+        if raw_status == "filled":
+            filled = original
+            remaining = Decimal("0")
+            status = "FILLED"
         else:
-            normalized_status = str(
-                status or "unknown"
-            ).lower()
+            filled = original - remaining
+            if raw_status == "open":
+                status = "PARTIALLY_FILLED" if filled > 0 else "OPEN"
+            elif raw_status in ("canceled", "cancelled") or raw_status.endswith("canceled"):
+                status = "CANCELED"
+            elif raw_status == "rejected" or raw_status.endswith("rejected"):
+                status = "REJECTED"
+            else:
+                raise RuntimeError("Unrecognized order state; reconciliation required")
 
         return OrderInfo(
             order_id=str(order_id),
-            side=side,
-            size=original_size,
+            side=sides[raw_side],
+            size=original,
             price=price,
-            status=normalized_status,
+            status=status,
             filled_size=filled,
-            remaining_size=max(
-                Decimal("0"),
-                remaining_size,
-            ),
+            remaining_size=remaining,
         )
 
     def setup_order_update_handler(
