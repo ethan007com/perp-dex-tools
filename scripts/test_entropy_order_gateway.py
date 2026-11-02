@@ -1,4 +1,13 @@
+import os
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+if not (ROOT / "exchanges").is_dir():
+    raise SystemExit("无法定位项目根目录")
+
+sys.path.insert(0, str(ROOT))
 
 from exchanges.entropy_order_gateway import (
     EntropyOrderGateway,
@@ -7,17 +16,12 @@ from exchanges.entropy_order_gateway import (
 def mask(address: str) -> str:
     return address[:6] + "..." + address[-4:]
 
-root = Path.cwd().resolve()
-expected = (
-    Path.home() / "perp-dex-tools-entropy"
-).resolve()
-
-if root != expected:
-    raise SystemExit("Entropy 目录错误")
-
-gateway = EntropyOrderGateway(
-    ".env.entropy"
+env_file = os.environ.get(
+    "PERP_DEX_ENV_FILE",
+    str(ROOT / ".env"),
 )
+
+gateway = EntropyOrderGateway(env_file)
 
 status = gateway.status()
 

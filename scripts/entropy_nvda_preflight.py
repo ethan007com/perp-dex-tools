@@ -1,3 +1,5 @@
+import os
+import sys
 from pathlib import Path
 from decimal import Decimal
 
@@ -6,16 +8,20 @@ from eth_account import Account
 from hyperliquid.info import Info
 from hyperliquid.utils.constants import MAINNET_API_URL
 
-ROOT = Path.cwd().resolve()
-EXPECTED = (
-    Path.home() / "perp-dex-tools-entropy"
-).resolve()
+ROOT = Path(__file__).resolve().parents[1]
 
-if ROOT != EXPECTED:
-    raise SystemExit("Entropy 目录错误")
+if not (ROOT / "exchanges").is_dir():
+    raise SystemExit("无法定位项目根目录")
+
+sys.path.insert(0, str(ROOT))
+
+env_file = os.environ.get(
+    "PERP_DEX_ENV_FILE",
+    str(ROOT / ".env"),
+)
 
 cfg = dotenv_values(
-    ROOT / ".env.entropy",
+    env_file,
     interpolate=False,
 )
 
