@@ -471,7 +471,7 @@ class EntropyClient(BaseExchangeClient):
         return OrderResult(
             success=success,
             order_id=str(oid),
-            status="cancelled" if success else "failed",
+            status="CANCELED" if success else "FAILED",
             error_message=None
             if success
             else str(response)[:500],
