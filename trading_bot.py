@@ -192,6 +192,38 @@ class TradingBot:
         else:
             return 1
 
+    async def _reconcile_exchange_state(self):
+        if str(
+            self.config.exchange
+        ).lower() != "entropy":
+            return
+
+        try:
+            position = await (
+                self.exchange_client.get_account_positions()
+            )
+
+            orders = await (
+                self.exchange_client.get_active_orders(
+                    self.config.contract_id
+                )
+            )
+
+            self.logger.log(
+                "[RECOVERY] Entropy state reconciled: "
+                f"position={position}, "
+                f"active_orders={len(orders)}",
+                "INFO",
+            )
+
+        except Exception as exc:
+            self.logger.log(
+                "[RECOVERY] Entropy reconciliation failed: "
+                f"{exc}",
+                "ERROR",
+            )
+            raise
+
     async def _has_open_capacity(self) -> bool:
         """Prevent new entries from exceeding max-orders exposure.
 
@@ -269,6 +301,16 @@ class TradingBot:
 
             # Hard live exposure guard before every opening attempt.
             if not await self._has_open_capacity():
+                if str(
+                    self.config.exchange
+                ).lower() == "entropy":
+                    self.logger.log(
+                        "[RISK] Entropy exposure limit reached; "
+                        "sleeping 10 seconds before retry",
+                        "WARNING",
+                    )
+                    await asyncio.sleep(10)
+
                 return False
 
             # Place the order
@@ -1002,6 +1044,28 @@ class TradingBot:
             )
 
     async def send_notification(self, message: str):
+        exchange = str(
+            self.config.exchange
+        ).strip().lower()
+
+        exchange_name = {
+            "arcus": "Arcus",
+            "entropy": "Entropy",
+        }.get(
+            exchange,
+            exchange.capitalize(),
+        )
+
+        market = str(
+            self.config.ticker
+            or self.config.contract_id
+        ).strip()
+
+        prefix = f"[{exchange_name} {market}]"
+
+        if not message.startswith(prefix):
+            message = prefix + "\n" + message
+
         lark_token = os.getenv("LARK_TOKEN")
         if lark_token:
             async with LarkBot(lark_token) as lark_bot:
@@ -1050,6 +1114,11 @@ class TradingBot:
             self.loop = asyncio.get_running_loop()
             # Connect to exchange
             await self.exchange_client.connect()
+
+            if str(
+                self.config.exchange
+            ).lower() == "entropy":
+                await self._reconcile_exchange_state()
 
             # wait for connection to establish
             await asyncio.sleep(5)

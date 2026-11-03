@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -81,7 +82,10 @@ class EntropyClient(BaseExchangeClient):
     async def connect(self) -> None:
         self.gateway = await asyncio.to_thread(
             EntropyOrderGateway,
-            ".env.entropy",
+            os.environ.get(
+                "PERP_DEX_ENV_FILE",
+                ".env",
+            ),
         )
 
         self._market = self.gateway.market
@@ -103,6 +107,106 @@ class EntropyClient(BaseExchangeClient):
             await self.connect()
         return self._require_gateway()
 
+    @staticmethod
+    def _is_rate_limited(exc):
+        code = getattr(
+            exc,
+            "status_code",
+            None,
+        )
+
+        if code is None:
+            code = getattr(
+                exc,
+                "status",
+                None,
+            )
+
+        if code is None and getattr(
+            exc,
+            "args",
+            None,
+        ):
+            first = exc.args[0]
+            if isinstance(first, int):
+                code = first
+
+        return str(code) == "429"
+
+    async def _read_call(
+        self,
+        function,
+        *args,
+        **kwargs,
+    ):
+        # Read-only requests may be retried.
+        # Writes must never use this helper.
+        delays = (1, 2, 4, 8)
+
+        for attempt, delay in enumerate(delays):
+            try:
+                return await asyncio.to_thread(
+                    function,
+                    *args,
+                    **kwargs,
+                )
+            except Exception as exc:
+                if not self._is_rate_limited(exc):
+                    raise
+
+                if attempt == len(delays) - 1:
+                    raise
+
+                await asyncio.sleep(delay)
+
+        raise RuntimeError(
+            "read request retry loop exhausted"
+        )
+
+    async def _reconcile_after_rate_limit(self):
+        gateway = await self._require_connected()
+
+        # Recovery reconciliation uses read-only calls only.
+        state = await self._read_call(
+            self._read_call(
+                gateway.info.user_state,
+                gateway.account_address,
+                dex=gateway.dex,
+            ),
+        )
+
+        orders = await self._read_call(
+            gateway.open_orders,
+        )
+
+        position_size = Decimal("0")
+
+        for item in state.get(
+            "assetPositions",
+            [],
+        ):
+            position = item.get(
+                "position",
+                {},
+            )
+
+            if position.get("coin") != gateway.coin:
+                continue
+
+            position_size += _d(
+                position.get("szi")
+            )
+
+        active_orders = [
+            order for order in orders
+            if order.get("coin") == gateway.coin
+        ]
+
+        return {
+            "position_size": position_size,
+            "active_orders": active_orders,
+        }
+
     async def get_contract_attributes(self):
         gateway = await self._require_connected()
 
@@ -120,8 +224,9 @@ class EntropyClient(BaseExchangeClient):
         if contract_id != gateway.coin:
             raise ValueError("Unsupported Entropy contract")
 
-        book = await asyncio.to_thread(
-            gateway.info.l2_snapshot, gateway.coin
+        book = await self._read_call(
+            gateway.info.l2_snapshot,
+            gateway.coin,
         )
         levels = book.get("levels", [])
         if len(levels) != 2 or not levels[0] or not levels[1]:
@@ -153,11 +258,11 @@ class EntropyClient(BaseExchangeClient):
     async def get_account_positions(self) -> Decimal:
         gateway = await self._require_connected()
 
-        state = await asyncio.to_thread(
-            gateway.info.user_state,
-            gateway.account_address,
-            dex=gateway.dex,
-        )
+        await self._read_call(
+                gateway.info.user_state,
+                gateway.account_address,
+                dex=gateway.dex,
+            )
 
         total = Decimal("0")
 
@@ -182,7 +287,9 @@ class EntropyClient(BaseExchangeClient):
         if contract_id != gateway.coin:
             raise ValueError("Unsupported Entropy contract")
 
-        orders = await asyncio.to_thread(gateway.open_orders)
+        orders = await self._read_call(
+            gateway.open_orders,
+        )
         if not isinstance(orders, list):
             raise RuntimeError("Active orders response invalid")
 
@@ -229,11 +336,11 @@ class EntropyClient(BaseExchangeClient):
 
     async def get_account_snapshot(self):
         gateway = await self._require_connected()
-        state = await asyncio.to_thread(
-            gateway.info.user_state,
-            gateway.account_address,
-            dex=gateway.dex,
-        )
+        await self._read_call(
+                gateway.info.user_state,
+                gateway.account_address,
+                dex=gateway.dex,
+            )
         if not isinstance(state, dict) or "assetPositions" not in state:
             raise RuntimeError("Invalid account state; cannot report FLAT")
 
@@ -295,7 +402,7 @@ class EntropyClient(BaseExchangeClient):
         # withdrawable=0 in the selected dex state even when
         # Spot USDC is usable as unified collateral.
         if gateway.dex == "io":
-            spot_state = await asyncio.to_thread(
+            spot_state = await self._read_call(
                 gateway.info.spot_user_state,
                 gateway.account_address,
             )
@@ -553,72 +660,156 @@ class EntropyClient(BaseExchangeClient):
 
     async def get_order_info(self, order_id):
         gateway = await self._require_connected()
-        response = await asyncio.to_thread(
-            gateway.query_order, int(order_id)
+
+        response = await self._read_call(
+            gateway.query_order,
+            int(order_id),
         )
 
-        # Unknown order is not equivalent to canceled or unfilled.
         if not isinstance(response, dict):
-            raise RuntimeError("Order query response invalid; reconciliation required")
+            raise RuntimeError(
+                "Order query response invalid; "
+                "reconciliation required"
+            )
+
         if response.get("status") != "order":
-            raise RuntimeError("Order state unknown; do not resubmit automatically")
+            raise RuntimeError(
+                "Order state unknown; "
+                "do not resubmit automatically"
+            )
 
         envelope = response.get("order")
+
         if not isinstance(envelope, dict):
-            raise RuntimeError("Order query envelope invalid")
+            raise RuntimeError(
+                "Order query envelope invalid"
+            )
 
-        # Standard nested response:
-        # response.order.status
-        # response.order.order.{oid, coin, side, origSz, sz, limitPx}
-        # Also accept the earlier flat test fixture.
-        details = envelope.get("order", envelope)
+        details = envelope.get(
+            "order",
+            envelope,
+        )
+
         if not isinstance(details, dict):
-            raise RuntimeError("Order details invalid")
+            raise RuntimeError(
+                "Order details invalid"
+            )
 
-        oid = details.get("oid")
-        if oid is not None and str(oid) != str(order_id):
-            raise RuntimeError("Order id mismatch")
+        returned_oid = details.get("oid")
+
+        if (
+            returned_oid is not None
+            and str(returned_oid) != str(order_id)
+        ):
+            raise RuntimeError(
+                "Order id mismatch"
+            )
 
         coin = details.get("coin")
-        if coin is not None and coin != gateway.coin:
-            raise RuntimeError("Order belongs to another market")
 
-        raw_side = str(details.get("side", "")).upper()
-        sides = {"B": "BUY", "A": "SELL", "BUY": "BUY", "SELL": "SELL"}
+        if (
+            coin is not None
+            and coin != gateway.coin
+        ):
+            raise RuntimeError(
+                "Order belongs to another market"
+            )
+
+        raw_side = str(
+            details.get("side", "")
+        ).upper()
+
+        sides = {
+            "B": "BUY",
+            "A": "SELL",
+            "BUY": "BUY",
+            "SELL": "SELL",
+        }
+
         if raw_side not in sides:
-            raise RuntimeError("Unknown order side")
+            raise RuntimeError(
+                "Unknown order side"
+            )
 
         def number(key):
             try:
-                value = Decimal(str(details[key]))
+                value = Decimal(
+                    str(details[key])
+                )
             except Exception:
-                raise RuntimeError("Order numeric field missing or invalid") from None
-            if not value.is_finite() or value < 0:
-                raise RuntimeError("Order numeric field outside valid range")
+                raise RuntimeError(
+                    "Order numeric field missing "
+                    "or invalid"
+                ) from None
+
+            if (
+                not value.is_finite()
+                or value < 0
+            ):
+                raise RuntimeError(
+                    "Order numeric field outside "
+                    "valid range"
+                )
+
             return value
 
-        # Do not use `sz or origSz`: numeric zero is a valid remaining size.
         original = number("origSz")
         remaining = number("sz")
         price = number("limitPx")
-        if original <= 0 or price <= 0 or remaining > original:
-            raise RuntimeError("Order quantities or price are inconsistent")
 
-        raw_status = str(envelope.get("status", "")).lower()
+        if (
+            original <= 0
+            or price <= 0
+            or remaining > original
+        ):
+            raise RuntimeError(
+                "Order quantities or price "
+                "are inconsistent"
+            )
+
+        raw_status = str(
+            envelope.get("status", "")
+        ).lower()
+
         if raw_status == "filled":
             filled = original
             remaining = Decimal("0")
             status = "FILLED"
+
         else:
             filled = original - remaining
+
             if raw_status == "open":
-                status = "PARTIALLY_FILLED" if filled > 0 else "OPEN"
-            elif raw_status in ("canceled", "cancelled") or raw_status.endswith("canceled"):
+                status = (
+                    "PARTIALLY_FILLED"
+                    if filled > 0
+                    else "OPEN"
+                )
+
+            elif (
+                raw_status in (
+                    "canceled",
+                    "cancelled",
+                )
+                or raw_status.endswith(
+                    "canceled"
+                )
+            ):
                 status = "CANCELED"
-            elif raw_status == "rejected" or raw_status.endswith("rejected"):
+
+            elif (
+                raw_status == "rejected"
+                or raw_status.endswith(
+                    "rejected"
+                )
+            ):
                 status = "REJECTED"
+
             else:
-                raise RuntimeError("Unrecognized order state; reconciliation required")
+                raise RuntimeError(
+                    "Unrecognized order state; "
+                    "reconciliation required"
+                )
 
         return OrderInfo(
             order_id=str(order_id),
