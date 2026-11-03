@@ -263,6 +263,52 @@ class EntropyClient(BaseExchangeClient):
         if not gateway.trading_enabled:
             return False
 
+        # Hyperliquid Unified Account / HIP-3 may report
+        # withdrawable=0 in the selected dex state even when
+        # Spot USDC is usable as unified collateral.
+        if gateway.dex == "io":
+            spot_state = await asyncio.to_thread(
+                gateway.info.spot_user_state,
+                gateway.account_address,
+            )
+
+            balances = spot_state.get(
+                "balances",
+                [],
+            )
+
+            for balance in balances:
+                if str(
+                    balance.get("coin", "")
+                ).upper() != "USDC":
+                    continue
+
+                total = Decimal(
+                    str(
+                        balance.get(
+                            "total",
+                            "0",
+                        )
+                    )
+                )
+
+                hold = Decimal(
+                    str(
+                        balance.get(
+                            "hold",
+                            "0",
+                        )
+                    )
+                )
+
+                available = total - hold
+
+                # io:NVDA has a minimum order notional
+                # of approximately 10 USDC.
+                return available >= Decimal("10")
+
+            return False
+
         snapshot = await self.get_account_snapshot()
 
         return (

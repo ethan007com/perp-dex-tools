@@ -643,6 +643,26 @@ class TradingBot:
             return default
         return value.strip().lower() in ("1", "true", "yes", "on")
 
+    def _notification_market_label(self):
+        exchange = str(
+            self.config.exchange
+        ).strip().lower()
+
+        exchange_name = {
+            "arcus": "Arcus",
+            "entropy": "Entropy",
+        }.get(
+            exchange,
+            exchange.capitalize(),
+        )
+
+        market = str(
+            self.config.ticker
+            or self.config.contract_id
+        ).strip()
+
+        return exchange_name, market
+
     async def _notify_order_event(
         self,
         title: str,
@@ -659,10 +679,19 @@ class TradingBot:
         ):
             return
 
+        exchange_name, market = (
+            self._notification_market_label()
+        )
+
+        title = title.replace(
+            "Arcus QQQ",
+            f"{exchange_name} {market}",
+        )
+
         message = (
             f"{title}\n"
-            f"交易所：Arcus\n"
-            f"市场：{self.config.contract_id}\n"
+            f"交易所：{exchange_name}\n"
+            f"市场：{market}\n"
             f"方向：{str(side).upper()}\n"
             f"数量：{quantity}\n"
             f"价格：{price}\n"
@@ -767,8 +796,12 @@ class TradingBot:
                 unrealized = "0"
                 funding = "N/A"
 
+            exchange_name, market = (
+                self._notification_market_label()
+            )
+
             message = (
-                "📊 Arcus QQQ 状态\n\n"
+                f"📊 {exchange_name} {market} 状态\n\n"
                 f"方向：{side}\n"
                 f"仓位：{size}\n"
                 f"平均入场价：{entry}\n"
