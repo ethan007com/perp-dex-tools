@@ -229,32 +229,60 @@ class EntropyClient(BaseExchangeClient):
 
     async def get_account_snapshot(self):
         gateway = await self._require_connected()
-
         state = await asyncio.to_thread(
             gateway.info.user_state,
             gateway.account_address,
             dex=gateway.dex,
         )
+        if not isinstance(state, dict) or "assetPositions" not in state:
+            raise RuntimeError("Invalid account state; cannot report FLAT")
 
-        margin = state.get(
-            "marginSummary",
-            {},
-        )
+        positions = {}
+        for item in state["assetPositions"]:
+            p = item["position"]
+            if p.get("coin") != gateway.coin:
+                continue
 
+            signed_size = Decimal(str(p["szi"]))
+            if not signed_size.is_finite():
+                raise RuntimeError("Invalid position size")
+            if signed_size == 0:
+                continue
+
+            value = Decimal(str(p["positionValue"]))
+            leverage = p.get("leverage", {})
+            funding = p.get("cumFunding", {})
+
+            positions[gateway.coin] = {
+                "marketDisplayName": gateway.coin,
+                "side": "LONG" if signed_size > 0 else "SHORT",
+                "size": str(abs(signed_size)),
+                "averageEntryPrice": p.get("entryPx", "N/A"),
+                # Derived from position value, not an independent mark-price feed.
+                "markPx": str(value / abs(signed_size)),
+                "positionValueNotional": str(value),
+                "marginUsed": p.get("marginUsed", "N/A"),
+                "leverage": leverage.get("value", "N/A"),
+                "unrealizedPnl": p.get("unrealizedPnl", "N/A"),
+                "cumulativeFunding": funding.get("sinceOpen", "N/A"),
+            }
+
+        margin = state.get("marginSummary", {})
         return {
-            "account_value": _d(
-                margin.get("accountValue")
+            # Preserve existing adapter fields.
+            "account_value": _d(margin.get("accountValue")),
+            "total_margin_used": _d(margin.get("totalMarginUsed")),
+            "total_notional": _d(margin.get("totalNtlPos")),
+            "withdrawable": _d(state.get("withdrawable")),
+            "position_size": sum(
+                (Decimal(p["size"]) for p in positions.values()),
+                Decimal("0"),
             ),
-            "total_margin_used": _d(
-                margin.get("totalMarginUsed")
-            ),
-            "total_notional": _d(
-                margin.get("totalNtlPos")
-            ),
-            "withdrawable": _d(
-                state.get("withdrawable")
-            ),
-            "position_size": await self.get_account_positions(),
+            # Fields consumed by the current Telegram formatter.
+            "positions": positions,
+            "equity": "N/A（Unified Account 总权益未映射）",
+            "freeCollateral": "N/A（不能用 io withdrawable 代表统一保证金）",
+            "netQuoteBalance": "N/A（未映射）",
         }
 
     async def can_open_new_orders(self) -> bool:

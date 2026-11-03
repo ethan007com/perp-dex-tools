@@ -714,12 +714,18 @@ class TradingBot:
             return
 
         interval = int(
-            os.getenv("TELEGRAM_STATUS_INTERVAL", "300")
+            os.getenv(
+                "TELEGRAM_STATUS_INTERVAL",
+                "300",
+            )
         )
 
         now = time.time()
 
-        if now - self.last_telegram_status_time < interval:
+        if (
+            now - self.last_telegram_status_time
+            < interval
+        ):
             return
 
         snapshot_method = getattr(
@@ -734,71 +740,238 @@ class TradingBot:
         try:
             account = await snapshot_method()
 
-            equity = account.get("equity", "N/A")
-            free_collateral = account.get(
-                "freeCollateral",
-                "N/A",
+            exchange_key = str(
+                self.config.exchange
+            ).strip().lower()
+
+            exchange_name = {
+                "arcus": "Arcus",
+                "entropy": "Entropy",
+            }.get(
+                exchange_key,
+                exchange_key.capitalize(),
             )
-            net_quote_balance = account.get(
-                "netQuoteBalance",
-                "N/A",
-            )
 
-            positions = account.get("positions", {})
-            position_row = None
+            market = str(
+                self.config.ticker
+                or self.config.contract_id
+            ).strip()
 
-            for row in positions.values():
-                if str(row.get("marketDisplayName", "")).upper() == str(
-                    self.config.contract_id
-                ).upper():
-                    position_row = row
-                    break
+            try:
+                current_position = Decimal(
+                    str(position_amount or "0")
+                )
+            except Exception:
+                current_position = Decimal("0")
 
-            if position_row is None and positions:
-                position_row = next(iter(positions.values()))
+            try:
+                protected_amount = Decimal(
+                    str(active_close_amount or "0")
+                )
+            except Exception:
+                protected_amount = Decimal("0")
 
-            if position_row:
-                side = position_row.get("side", "FLAT")
-                size = position_row.get("size", "0")
-                entry = position_row.get(
-                    "averageEntryPrice",
+            if exchange_key == "entropy":
+                # Use the strategy's actual live position
+                # as the primary value. Do not trust a stale
+                # account snapshot to replace 0.05 with zero.
+                raw_size = account.get(
+                    "position_size",
+                    current_position,
+                )
+
+                try:
+                    snapshot_size = Decimal(
+                        str(raw_size or "0")
+                    )
+                except Exception:
+                    snapshot_size = current_position
+
+                if current_position != 0:
+                    signed_size = current_position
+                else:
+                    signed_size = snapshot_size
+
+                positions = account.get(
+                    "positions",
+                    {},
+                )
+
+                row = None
+                if isinstance(positions, dict):
+                    row = positions.get(
+                        self.config.contract_id
+                    )
+
+                    if row is None and positions:
+                        row = next(
+                            iter(positions.values())
+                        )
+
+                if row:
+                    side = row.get(
+                        "side",
+                        "LONG"
+                        if signed_size > 0
+                        else "SHORT",
+                    )
+                    size = row.get(
+                        "size",
+                        str(abs(signed_size)),
+                    )
+                    entry = row.get(
+                        "averageEntryPrice",
+                        "N/A",
+                    )
+                    mark = row.get(
+                        "markPx",
+                        "N/A",
+                    )
+                    notional = row.get(
+                        "positionValueNotional",
+                        account.get(
+                            "total_notional",
+                            "0",
+                        ),
+                    )
+                    margin = row.get(
+                        "marginUsed",
+                        account.get(
+                            "total_margin_used",
+                            "N/A",
+                        ),
+                    )
+                    leverage = row.get(
+                        "leverage",
+                        "N/A",
+                    )
+                    unrealized = row.get(
+                        "unrealizedPnl",
+                        "N/A",
+                    )
+                    funding = row.get(
+                        "cumulativeFunding",
+                        "N/A",
+                    )
+                else:
+                    if signed_size > 0:
+                        side = "LONG"
+                    elif signed_size < 0:
+                        side = "SHORT"
+                    else:
+                        side = "FLAT"
+
+                    size = str(abs(signed_size))
+                    entry = "N/A"
+                    mark = "N/A"
+                    notional = account.get(
+                        "total_notional",
+                        "0",
+                    )
+                    margin = account.get(
+                        "total_margin_used",
+                        "N/A",
+                    )
+                    leverage = "N/A"
+                    unrealized = "N/A"
+                    funding = "N/A"
+
+                equity = account.get(
+                    "account_value",
                     "N/A",
                 )
-                mark = position_row.get("markPx", "N/A")
-                notional = position_row.get(
-                    "positionValueNotional",
+                free_collateral = account.get(
+                    "withdrawable",
                     "N/A",
                 )
-                margin = position_row.get(
-                    "marginUsed",
-                    "N/A",
-                )
-                leverage = position_row.get(
-                    "leverage",
-                    "N/A",
-                )
-                unrealized = position_row.get(
-                    "unrealizedPnl",
-                    "0",
-                )
-                funding = position_row.get(
-                    "cumulativeFunding",
-                    "N/A",
-                )
+                net_quote_balance = "N/A"
+
             else:
-                side = "FLAT"
-                size = "0"
-                entry = "N/A"
-                mark = "N/A"
-                notional = "0"
-                margin = "0"
-                leverage = "N/A"
-                unrealized = "0"
-                funding = "N/A"
+                equity = account.get(
+                    "equity",
+                    "N/A",
+                )
+                free_collateral = account.get(
+                    "freeCollateral",
+                    "N/A",
+                )
+                net_quote_balance = account.get(
+                    "netQuoteBalance",
+                    "N/A",
+                )
 
-            exchange_name, market = (
-                self._notification_market_label()
-            )
+                positions = account.get(
+                    "positions",
+                    {},
+                )
+
+                row = None
+                if isinstance(positions, dict):
+                    for candidate in positions.values():
+                        if str(
+                            candidate.get(
+                                "marketDisplayName",
+                                "",
+                            )
+                        ).upper() == str(
+                            self.config.contract_id
+                        ).upper():
+                            row = candidate
+                            break
+
+                    if row is None and positions:
+                        row = next(
+                            iter(positions.values())
+                        )
+
+                if row:
+                    side = row.get("side", "FLAT")
+                    size = row.get("size", "0")
+                    entry = row.get(
+                        "averageEntryPrice",
+                        "N/A",
+                    )
+                    mark = row.get(
+                        "markPx",
+                        "N/A",
+                    )
+                    notional = row.get(
+                        "positionValueNotional",
+                        "N/A",
+                    )
+                    margin = row.get(
+                        "marginUsed",
+                        "N/A",
+                    )
+                    leverage = row.get(
+                        "leverage",
+                        "N/A",
+                    )
+                    unrealized = row.get(
+                        "unrealizedPnl",
+                        "0",
+                    )
+                    funding = row.get(
+                        "cumulativeFunding",
+                        "N/A",
+                    )
+                else:
+                    side = "FLAT"
+                    size = "0"
+                    entry = "N/A"
+                    mark = "N/A"
+                    notional = "0"
+                    margin = "0"
+                    leverage = "N/A"
+                    unrealized = "0"
+                    funding = "N/A"
+
+            if current_position == 0:
+                risk = "正常"
+            elif protected_amount >= abs(current_position):
+                risk = "正常"
+            else:
+                risk = "需要检查"
 
             message = (
                 f"📊 {exchange_name} {market} 状态\n\n"
@@ -816,8 +989,7 @@ class TradingBot:
                 f"净报价余额：{net_quote_balance}\n\n"
                 f"活动平仓数量：{active_close_amount}\n"
                 f"保护数量：{active_close_amount}\n"
-                f"风险状态："
-                f"{'正常' if abs(position_amount) <= abs(active_close_amount) else '需要检查'}"
+                f"风险状态：{risk}"
             )
 
             await self.send_notification(message)

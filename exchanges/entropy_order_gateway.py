@@ -275,7 +275,7 @@ class EntropyOrderGateway:
 
         normalized_size = self.normalize_size(size)
         limit_price = float(
-            Decimal(str(price))
+            self.normalize_limit_price(price, is_buy)
         )
 
         if limit_price <= 0:
@@ -309,7 +309,7 @@ class EntropyOrderGateway:
 
         normalized_size = self.normalize_size(size)
         limit_price = float(
-            Decimal(str(price))
+            self.normalize_limit_price(price, is_buy)
         )
 
         if limit_price <= 0:
@@ -378,3 +378,29 @@ class EntropyOrderGateway:
         return self.info.user_fills(
             self.account_address,
         )
+
+    def normalize_limit_price(self, price, is_buy):
+        from decimal import Decimal, ROUND_FLOOR, ROUND_CEILING, localcontext
+
+        value = Decimal(str(price))
+        if not value.is_finite() or value <= 0:
+            raise ValueError("Limit price must be finite and positive")
+
+        # Perp prices: at most 5 significant figures, and at most
+        # 6 - szDecimals decimal places; integer prices are allowed.
+        if value == value.to_integral_value():
+            return value
+
+        decimals = max(0, 6 - int(self.sz_decimals))
+        exponent = max(value.adjusted() - 4, -decimals)
+        quantum = Decimal(1).scaleb(exponent)
+
+        # Do not make the requested price more aggressive.
+        rounding = ROUND_FLOOR if is_buy else ROUND_CEILING
+        with localcontext() as ctx:
+            ctx.prec = max(40, len(value.as_tuple().digits) + 10)
+            result = value.quantize(quantum, rounding=rounding)
+
+        if result <= 0:
+            raise ValueError("Normalized price must be positive")
+        return result
